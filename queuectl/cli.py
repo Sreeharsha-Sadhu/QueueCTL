@@ -98,8 +98,10 @@ def enqueue(job_json_string):
     Example:
     queuectl enqueue '{"id":"job1","command":"sleep 2"}'
 
-    With custom retries:
-    queuectl enqueue '{"id":"job2","command":"/bin/false","max_retries":5}'
+    With optional fields:
+    queuectl enqueue '{"id":"job2", "command":"echo high", "priority": 10}'
+    queuectl enqueue '{"id":"job3", "command":"echo later", "run_at": "2025-11-10T10:00:00Z"}'
+    queuectl enqueue '{"id":"job4", "command":"/bin/false", "max_retries": 5}'
     """
     try:
         job_data = json.loads(job_json_string)
@@ -109,15 +111,46 @@ def enqueue(job_json_string):
     
     job_id = job_data.get('id')
     command = job_data.get('command')
-    max_retries = job_data.get('max_retries')  # Can be None
     
     if not job_id or not command:
         click.echo("Error: Job data must include 'id' and 'command'.")
         return
     
-    database.create_job(job_id, command, max_retries)
+    # --- NEW: Get optional fields ---
+    max_retries = job_data.get('max_retries')  # Can be None
+    run_at_str = job_data.get('run_at')  # Can be None
+    priority = job_data.get('priority', 0)  # Default 0
+    timeout = job_data.get('timeout')  # Can be None
+    
+    database.create_job(job_id, command, max_retries, run_at_str, priority, timeout)
 
 
+# --- Logs Command ---
+@cli.command()
+@click.argument('job_id')
+@click.option('--stderr', 'log_type', flag_value='err', help="Show stderr log.")
+@click.option('--stdout', 'log_type', flag_value='out', default=True, help="Show stdout log (default).")
+def logs(job_id, log_type):
+    """
+    Show the stdout or stderr logs for a job.
+    Logs are stored in the 'logs/' directory.
+    """
+    log_dir = 'logs'
+    log_suffix = 'out.log' if log_type == 'out' else 'err.log'
+    log_file_path = os.path.join(log_dir, f"{job_id}.{log_suffix}")
+    
+    if not os.path.exists(log_file_path):
+        click.echo(f"Log file not found: {log_file_path}")
+        click.echo(f"Ensure the 'logs/' directory exists and the job has run.")
+        return
+    
+    try:
+        with open(log_file_path, 'r') as f:
+            click.echo(f.read())
+    except Exception as e:
+        click.echo(f"Error reading log file: {e}")
+        
+        
 # --- Worker Commands ---
 
 @cli.group()
