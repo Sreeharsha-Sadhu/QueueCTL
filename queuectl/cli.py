@@ -1,9 +1,10 @@
 # queuectl/cli.py
+import os
 
 import click
 import json
 from . import database
-
+from . import worker as worker_module
 
 @click.group()
 def cli():
@@ -73,6 +74,35 @@ def enqueue(job_json_string):
         return
     
     database.create_job(job_id, command, max_retries)
+
+
+# --- Worker Commands ---
+
+@cli.group()
+def worker():
+    """
+    Manage worker processes.
+    """
+    pass
+
+
+@worker.command('start')
+@click.option('--count', default=1, type=int, help='Number of workers to start.')
+def start(count):
+    """
+    Start one or more worker processes.
+    """
+    if count > 1:
+        click.echo(f"Info: Multiple workers ({count}) not yet implemented in Stage 1.")
+        click.echo("Starting 1 worker instead.")
+        # Stage 3 will implement multiprocessing here.
+    
+    pid = os.getpid()
+    click.echo(f"Starting worker process (PID: {pid})...")
+    click.echo("Press Ctrl+C to exit.")
+    
+    # This function will run until terminated
+    worker_module.run_worker_loop()
 
 
 if __name__ == '__main__':

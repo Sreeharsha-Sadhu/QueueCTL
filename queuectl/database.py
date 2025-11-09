@@ -60,9 +60,15 @@ def init_db():
                    )
                    """)
     
-    # Set default values
-    cursor.execute("INSERT OR IGNORE INTO config (key, value) VALUES ('max_retries', '3')")
-    cursor.execute("INSERT OR IGNORE INTO config (key, value) VALUES ('backoff_base', '2')")
+    # Set default values in a portable way (ignore if already present)
+    try:
+        cursor.execute("INSERT INTO config (key, value) VALUES (?, ?)", ('max_retries', '3'))
+    except sqlite3.IntegrityError:
+        pass
+    try:
+        cursor.execute("INSERT INTO config (key, value) VALUES (?, ?)", ('backoff_base', '2'))
+    except sqlite3.IntegrityError:
+        pass
     
     conn.commit()
     conn.close()
@@ -127,5 +133,132 @@ def create_job(job_id, command, max_retries_override=None):
         print(f"Error: Job with ID '{job_id}' already exists.")
     except Exception as e:
         print(f"Error enqueuing job: {e}")
+    finally:
+        conn.close()
+
+
+# queuectl/database.py
+# ... (add these functions to your existing file) ...
+
+def fetch_and_lock_job():
+    """
+    Atomically fetches the next available job and marks it as 'processing'.
+
+    This function uses 'BEGIN IMMEDIATE' to acquire a database lock
+    to prevent multiple workers from grabbing the same job.
+    """
+    conn = get_db_connection()
+    try:
+        # 'BEGIN IMMEDIATE' acquires a RESERVED lock immediately,
+        # which is upgraded to EXCLUSIVE on the first write (the UPDATE).
+        # This blocks other writers, ensuring atomicity.
+        conn.execute("BEGIN IMMEDIATE")
+        
+        now = datetime.now(timezone.utc)
+        
+        # Fetch a job that is 'pending' OR 'failed' and ready for retry
+        cursor = conn.execute(
+            """
+            SELECT *
+            FROM jobs
+            WHERE (state = 'pending' OR (state = 'failed' AND run_at <= ?))
+            ORDER BY created_at ASC
+            LIMIT 1
+            """,
+            (now,)
+        )
+        job = cursor.fetchone()
+        
+        if job:
+            # We found a job, lock it by setting its state
+            conn.execute(
+                """
+                UPDATE jobs
+                SET state      = 'processing',
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (now, job['id'])
+            )
+            conn.commit()
+            return dict(job)  # Return as a standard dict
+        else:
+            # No job found, just commit the empty transaction
+            conn.commit()
+            return None
+    
+    except sqlite3.Error as e:
+        print(f"Database error fetching job: {e}")
+        conn.rollback()
+        return None
+    finally:
+        conn.close()
+
+
+def finalize_job(job_id, success):
+    """
+    Finalizes a job by marking it 'completed' or handling failure.
+
+    NOTE: In Stage 1, we only handle the 'completed' state.
+    Stage 2 will add the 'failed' and 'dead' logic.
+    """
+    conn = get_db_connection()
+    now = datetime.now(timezone.utc)
+    
+    try:
+        if success:
+            conn.execute(
+                """
+                UPDATE jobs
+                SET state      = 'completed',
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (now, job_id)
+            )
+        else:
+            # --- STAGE 2 PREVIEW ---
+            # This is where retry/DLQ logic will go.
+            # For now, we'll just log it.
+            print(f"Job {job_id} failed. (Retry logic not yet implemented)")
+            # In a real (but simple) Stage 1, we could just mark it 'failed'
+            # But we will build the full logic in the next stage.
+            # For now, we will just set it to 'failed' temporarily.
+            # This will be overwritten by Stage 2.
+            conn.execute(
+                """
+                UPDATE jobs
+                SET state      = 'failed',
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (now, job_id)
+            )
+        
+        conn.commit()
+    except sqlite3.Error as e:
+        print(f"Database error finalizing job {job_id}: {e}")
+    finally:
+        conn.close()
+
+
+def release_job(job_id):
+    """Resets a 'processing' job back to 'pending' on graceful shutdown."""
+    conn = get_db_connection()
+    now = datetime.now(timezone.utc)
+    try:
+        conn.execute(
+            """
+            UPDATE jobs
+            SET state      = 'pending',
+                updated_at = ?
+            WHERE id = ?
+              AND state = 'processing'
+            """,
+            (now, job_id)
+        )
+        conn.commit()
+    except sqlite3.Error as e:
+        print(f"Database error releasing job {job_id}: {e}")
     finally:
         conn.close()
