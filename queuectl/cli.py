@@ -9,6 +9,7 @@ import multiprocessing
 import time
 from . import database
 from . import worker as worker_module
+from . import dashboard
 
 PID_FILE = '.queuectl.pids'
 
@@ -149,8 +150,8 @@ def logs(job_id, log_type):
             click.echo(f.read())
     except Exception as e:
         click.echo(f"Error reading log file: {e}")
-        
-        
+
+
 # --- Worker Commands ---
 
 @cli.group()
@@ -174,19 +175,22 @@ def start(count):
         click.echo("Run 'queuectl worker stop' to clear it.")
         return
     
-    # --- Get main PID ---
     main_pid = str(os.getpid())
-    
     shutdown_event = multiprocessing.Event()
     processes = []
     
+    # This handler will now ONLY handle SIGTERM (from 'worker stop')
     def handle_parent_shutdown(sig, frame):
         if not shutdown_event.is_set():
-            click.echo("\nCtrl+C or SIGTERM received. Sending shutdown signal to all workers...")
+            # Updated message to be specific
+            click.echo("\n'worker stop' command (SIGTERM) received. Sending shutdown signal...")
             shutdown_event.set()
     
-    signal.signal(signal.SIGINT, handle_parent_shutdown)
+    # This line was causing the conflict.
+    
+    # KEEP: This line handles the 'worker stop' command.
     signal.signal(signal.SIGTERM, handle_parent_shutdown)
+    # --- END FIX ---
     
     for _ in range(count):
         proc = multiprocessing.Process(
@@ -196,30 +200,34 @@ def start(count):
         proc.start()
         processes.append(proc)
     
-    # --- Log child PIDs, but don't store them in the file ---
     child_pids_str = ", ".join([str(p.pid) for p in processes])
     click.echo(f"Started main process (PID: {main_pid}) with {count} worker(s): {child_pids_str}")
     click.echo("Workers running in foreground. Press Ctrl+C to shut down.")
     
     try:
-        # --- Write ONLY the main PID to the file ---
         with open(PID_FILE, 'w') as f:
             f.write(main_pid)
         
         while not shutdown_event.is_set():
             try:
+                # This sleep is interruptible by Ctrl+C
                 time.sleep(0.5)
             except KeyboardInterrupt:
-                pass
+                # This is now the ONLY place Ctrl+C is handled
+                # in the parent process.
+                if not shutdown_event.is_set():
+                    click.echo("\nCtrl+C received. Sending shutdown signal...")
+                    shutdown_event.set()
+                pass  # Let the loop re-check the shutdown_event
     
     except KeyboardInterrupt:
+        # Fallback in case interrupt happens outside the loop
         if not shutdown_event.is_set():
-            click.echo("\nUnexpected Ctrl+C. Forcing shutdown...")
+            click.echo("\nCtrl+C (fallback). Forcing shutdown...")
             shutdown_event.set()
         pass
     
     finally:
-        # --- Add logging for clarity ---
         click.echo(f"\nMain process {main_pid} received shutdown. Waiting for workers...")
         for p in processes:
             p.join()  # This will wait for workers to exit
@@ -238,17 +246,17 @@ def stop():
     if not os.path.exists(PID_FILE):
         click.echo("No PID file found. Are workers running?")
         return
-
+    
     click.echo(f"Reading main PID from file: {PID_FILE}")
     main_pid = None
     try:
         with open(PID_FILE, 'r') as f:
             pids = [int(pid) for pid in f.read().splitlines() if pid.strip()]
-
+        
         if not pids:
             click.echo("PID file is empty.")
             return
-
+        
         main_pid = pids[0]
         click.echo(f"Sending shutdown signal to process tree (PID: {main_pid})...")
         
@@ -258,12 +266,12 @@ def stop():
                 # /T - Kills the process AND any child processes.
                 # /F - Forcefully terminates the process.
                 subprocess.run(
-                    ['taskkill', '/PID', str(main_pid), '/T', '/F'], 
-                    check=True, 
+                    ['taskkill', '/PID', str(main_pid), '/T', '/F'],
+                    check=True,
                     capture_output=True,
                     text=True,
                     # Prevent new console window from flashing
-                    creationflags=0x08000000 
+                    creationflags=0x08000000
                 )
             else:
                 click.echo("Linux/macOS detected. Using 'os.kill'...")
@@ -276,7 +284,7 @@ def stop():
             click.echo(f"Failed to stop process {main_pid} (it may already be stopped): {e}")
             if hasattr(e, 'stderr') and e.stderr:
                 click.echo(f"Stderr: {e.stderr.strip()}")
-
+    
     except Exception as e:
         click.echo(f"Error reading PID file: {e}")
     finally:
@@ -285,8 +293,8 @@ def stop():
             click.echo("Cleaned up PID file.")
         
         click.echo("Stop command finished.")
-                
-        
+
+
 # --- List Command ---
 
 
@@ -352,6 +360,20 @@ def dlq_retry(job_id):
     Move a specific job from the DLQ back to 'pending'.
     """
     database.retry_dlq_job(job_id)
+
+
+@cli.command()
+def web():
+    """
+    Start a local web dashboard to monitor the queue.
+    """
+    try:
+        dashboard.run_web_server()
+    except ImportError:
+        click.echo("Error: 'flask' is not installed.")
+        click.echo("Please run 'pip install flask' to use the web dashboard.")
+    except Exception as e:
+        click.echo(f"Failed to start web server: {e}")
 
 
 if __name__ == '__main__':
