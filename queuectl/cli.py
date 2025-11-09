@@ -6,6 +6,7 @@ import json
 from . import database
 from . import worker as worker_module
 
+
 @click.group()
 def cli():
     """
@@ -27,7 +28,7 @@ def init():
 @cli.group()
 def config():
     """
-    Manage system configuration (max-retries, backoff-base).
+    Manage system configuration (max-retries, backoff_base).
     """
     pass
 
@@ -37,7 +38,7 @@ def config():
 @click.argument('value')
 def set_config(key, value):
     """
-    Set a configuration value (e.g., max-retries, backoff_base).
+    Set a configuration value (e.g., max_retries, backoff_base).
     """
     if key not in ('max_retries', 'backoff_base'):
         click.echo(f"Error: Unknown config key '{key}'. Allowed: max_retries, backoff_base")
@@ -103,6 +104,72 @@ def start(count):
     
     # This function will run until terminated
     worker_module.run_worker_loop()
+
+
+# --- List Command ---
+
+@cli.command('list')
+@click.option('--state',
+              type=click.Choice(['pending', 'processing', 'completed', 'failed', 'dead'], case_sensitive=False),
+              default='pending',
+              help='The state of jobs to list.')
+def list_jobs(state):
+    """
+    List jobs by their state.
+    """
+    jobs = database.get_jobs_by_state(state)
+    if not jobs:
+        click.echo(f"No jobs found with state: {state}")
+        return
+    
+    click.echo(f"--- Jobs ({state}) ---")
+    for job in jobs:
+        click.echo(f"ID: {job['id']}")
+        click.echo(f"  Command:   {job['command']}")
+        click.echo(f"  State:     {job['state']}")
+        click.echo(f"  Attempts:  {job['attempts']}/{job['max_retries']}")
+        if job['run_at']:
+            click.echo(f"  Next Run:  {job['run_at']}")
+        click.echo(f"  Created:   {job['created_at']}")
+        click.echo("-" * 20)
+
+
+# --- DLQ Commands ---
+
+@cli.group()
+def dlq():
+    """
+    Manage the Dead Letter Queue (DLQ).
+    """
+    pass
+
+
+@dlq.command('list')
+def dlq_list():
+    """
+    List all jobs in the Dead Letter Queue (state='dead').
+    """
+    jobs = database.get_jobs_by_state('dead')
+    if not jobs:
+        click.echo("Dead Letter Queue is empty.")
+        return
+    
+    click.echo("--- Dead Letter Queue Jobs ---")
+    for job in jobs:
+        click.echo(f"ID: {job['id']}")
+        click.echo(f"  Command:   {job['command']}")
+        click.echo(f"  Attempts:  {job['attempts']}/{job['max_retries']}")
+        click.echo(f"  Failed At: {job['updated_at']}")
+        click.echo("-" * 20)
+
+
+@dlq.command('retry')
+@click.argument('job_id')
+def dlq_retry(job_id):
+    """
+    Move a specific job from the DLQ back to 'pending'.
+    """
+    database.retry_dlq_job(job_id)
 
 
 if __name__ == '__main__':

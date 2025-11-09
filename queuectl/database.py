@@ -2,7 +2,8 @@
 
 import sqlite3
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+import sys
 
 DATABASE_FILE = 'queue.db'
 
@@ -11,7 +12,7 @@ def get_db_connection():
     """Establishes a connection to the SQLite database."""
     # Ensure the DB file exists if we're trying to connect
     if not os.path.exists(DATABASE_FILE):
-        if 'init' not in os.sys.argv:  # Avoid loop during init
+        if 'init' not in sys.argv:  # Avoid loop during init
             print(f"Error: Database file '{DATABASE_FILE}' not found.")
             print("Please run 'queuectl init' first.")
             exit(1)
@@ -162,7 +163,7 @@ def fetch_and_lock_job():
             SELECT *
             FROM jobs
             WHERE (state = 'pending' OR (state = 'failed' AND run_at <= ?))
-            ORDER BY created_at ASC
+            ORDER BY created_at
             LIMIT 1
             """,
             (now,)
@@ -197,16 +198,15 @@ def fetch_and_lock_job():
 
 def finalize_job(job_id, success):
     """
-    Finalizes a job by marking it 'completed' or handling failure.
-
-    NOTE: In Stage 1, we only handle the 'completed' state.
-    Stage 2 will add the 'failed' and 'dead' logic.
+    Finalizes a job by marking it 'completed' or handling failure
+    with exponential backoff and DLQ logic.
     """
     conn = get_db_connection()
     now = datetime.now(timezone.utc)
     
     try:
         if success:
+            # --- Happy Path ---
             conn.execute(
                 """
                 UPDATE jobs
@@ -217,29 +217,120 @@ def finalize_job(job_id, success):
                 (now, job_id)
             )
         else:
-            # --- STAGE 2 PREVIEW ---
-            # This is where retry/DLQ logic will go.
-            # For now, we'll just log it.
-            print(f"Job {job_id} failed. (Retry logic not yet implemented)")
-            # In a real (but simple) Stage 1, we could just mark it 'failed'
-            # But we will build the full logic in the next stage.
-            # For now, we will just set it to 'failed' temporarily.
-            # This will be overwritten by Stage 2.
-            conn.execute(
-                """
-                UPDATE jobs
-                SET state      = 'failed',
-                    updated_at = ?
-                WHERE id = ?
-                """,
-                (now, job_id)
+            # --- Unhappy Path (Retry/DLQ Logic) ---
+            conn.execute("BEGIN IMMEDIATE")  # Lock for read-modify-write
+            
+            # 1. Get current job state
+            cursor = conn.execute(
+                "SELECT attempts, max_retries FROM jobs WHERE id = ?", (job_id,)
             )
-        
-        conn.commit()
+            job = cursor.fetchone()
+            
+            if not job:
+                print(f"Error finalizing: Job {job_id} not found.")
+                conn.rollback()
+                return
+            
+            new_attempts = job['attempts'] + 1
+            
+            if new_attempts >= job['max_retries']:
+                # 2. Move to Dead Letter Queue (DLQ)
+                print(f"Job {job_id} failed. Max retries ({job['max_retries']}) reached. Moving to DLQ.")
+                conn.execute(
+                    """
+                    UPDATE jobs
+                    SET state      = 'dead',
+                        attempts   = ?,
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (new_attempts, now, job_id)
+                )
+            else:
+                # 3. Schedule for Retry with Exponential Backoff
+                
+                # Get backoff base from config (default to 2)
+                base_str = get_config('backoff_base', '2')
+                try:
+                    backoff_base = int(base_str)
+                except ValueError:
+                    print(f"Warning: Invalid backoff_base '{base_str}', using 2.")
+                    backoff_base = 2
+                
+                # delay = base ^ attempts
+                delay_seconds = backoff_base ** new_attempts
+                
+                retry_run_at = now + timedelta(seconds=delay_seconds)
+                
+                print(
+                    f"Job {job_id} failed. Attempt {new_attempts}/{job['max_retries']}. Retrying in {delay_seconds}s.")
+                
+                conn.execute(
+                    """
+                    UPDATE jobs
+                    SET state      = 'failed',
+                        attempts   = ?,
+                        updated_at = ?,
+                        run_at     = ?
+                    WHERE id = ?
+                    """,
+                    (new_attempts, now, retry_run_at, job_id)
+                )
+            conn.commit()  # Commit the read-modify-write transaction
+    
     except sqlite3.Error as e:
         print(f"Database error finalizing job {job_id}: {e}")
+        conn.rollback()  # Rollback on error
     finally:
         conn.close()
+
+
+def get_jobs_by_state(state):
+    """Fetches all jobs matching a specific state."""
+    conn = get_db_connection()
+    try:
+        cursor = conn.execute("SELECT * FROM jobs WHERE state = ?", (state,))
+        jobs = cursor.fetchall()
+        # Convert list of sqlite3.Row to list of dict
+        return [dict(job) for job in jobs]
+    except sqlite3.Error as e:
+        print(f"Database error getting jobs by state: {e}")
+        return []
+    finally:
+        conn.close()
+
+
+def retry_dlq_job(job_id):
+    """Moves a 'dead' job back to 'pending' to be retried."""
+    conn = get_db_connection()
+    now = datetime.now(timezone.utc)
+    try:
+        # Reset attempts, state, and run_at
+        cursor = conn.execute(
+            """
+            UPDATE jobs
+            SET state      = 'pending',
+                attempts   = 0,
+                updated_at = ?,
+                run_at     = NULL
+            WHERE id = ?
+              AND state = 'dead'
+            """,
+            (now, job_id)
+        )
+        
+        if cursor.rowcount > 0:
+            conn.commit()
+            print(f"Job {job_id} has been re-queued from the DLQ.")
+        else:
+            conn.rollback()
+            print(f"Error: Job {job_id} not found in DLQ (state='dead').")
+    
+    except sqlite3.Error as e:
+        print(f"Database error retrying job {job_id}: {e}")
+    finally:
+        conn.close()
+
 
 
 def release_job(job_id):
