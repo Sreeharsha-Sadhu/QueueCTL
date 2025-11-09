@@ -68,7 +68,7 @@ A job moves through a simple, well-defined state machine:
 
     ```sh
     git clone https://github.com/Sreeharsha-Sadhu/QueueCTL.git
-    cd queuectl_project
+    cd QueueCTL
     ```
 
 2.  **Create and activate a virtual environment:**
