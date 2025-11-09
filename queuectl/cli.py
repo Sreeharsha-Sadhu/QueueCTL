@@ -3,8 +3,13 @@ import os
 
 import click
 import json
+import signal
+import multiprocessing
+import time
 from . import database
 from . import worker as worker_module
+
+PID_FILE = '.queuectl.pids'
 
 
 @click.group()
@@ -21,6 +26,41 @@ def init():
     Initializes the queue database and tables.
     """
     database.init_db()
+
+
+@cli.command()
+def status():
+    """
+    Show a summary of all job states and active workers.
+    """
+    click.echo("--- Job Status ---")
+    try:
+        summary = database.get_job_status_summary()
+        if not summary:
+            click.echo("No jobs in the queue.")
+        else:
+            total = 0
+            for state, count in summary.items():
+                click.echo(f"- {state.capitalize():<12}: {count}")
+                total += count
+            click.echo(f"- {'Total':<12}: {total}")
+    
+    except Exception as e:
+        click.echo(f"Error getting job status: {e}")
+    
+    click.echo("\n--- Worker Status ---")
+    if os.path.exists(PID_FILE):
+        try:
+            with open(PID_FILE, 'r') as f:
+                pids = [pid for pid in f.read().splitlines() if pid.strip()]
+            if pids:
+                click.echo(f"Active: {len(pids)} worker(s) running (PIDs: {', '.join(pids)})")
+            else:
+                click.echo("Inactive: PID file is empty.")
+        except Exception as e:
+            click.echo(f"Error reading PID file: {e}")
+    else:
+        click.echo("Inactive: No PID file found.")
 
 
 # --- Config Commands ---
@@ -91,19 +131,103 @@ def worker():
 @click.option('--count', default=1, type=int, help='Number of workers to start.')
 def start(count):
     """
-    Start one or more worker processes.
+    Start one or more worker processes in the foreground.
+    Manages a .pid file for 'worker stop'.
+    Handles Ctrl+C for graceful shutdown.
     """
-    if count > 1:
-        click.echo(f"Info: Multiple workers ({count}) not yet implemented in Stage 1.")
-        click.echo("Starting 1 worker instead.")
-        # Stage 3 will implement multiprocessing here.
+    if os.path.exists(PID_FILE):
+        click.echo(f"Error: PID file '{PID_FILE}' already exists. Workers may already be running.")
+        click.echo("Run 'queuectl worker stop' to clear it.")
+        return
     
-    pid = os.getpid()
-    click.echo(f"Starting worker process (PID: {pid})...")
-    click.echo("Press Ctrl+C to exit.")
+    shutdown_event = multiprocessing.Event()
+    processes = []
+    pids = []
     
-    # This function will run until terminated
-    worker_module.run_worker_loop()
+    def handle_parent_shutdown(sig, frame):
+        if not shutdown_event.is_set():
+            click.echo("\nCtrl+C or SIGTERM received. Sending shutdown signal to all workers...")
+            shutdown_event.set()
+    
+    signal.signal(signal.SIGINT, handle_parent_shutdown)
+    signal.signal(signal.SIGTERM, handle_parent_shutdown)
+    
+    for _ in range(count):
+        proc = multiprocessing.Process(
+            target=worker_module.run_worker_loop,
+            args=(shutdown_event,)
+        )
+        proc.start()
+        processes.append(proc)
+        pids.append(str(proc.pid))
+    
+    click.echo(f"Started {count} worker(s) with PIDs: {', '.join(pids)}")
+    click.echo("Workers running in foreground. Press Ctrl+C to shut down.")
+    
+    try:
+        with open(PID_FILE, 'w') as f:
+            f.write("\n".join(pids))
+        
+        # --- Wait directly on the event ---
+        # The signal handler will set this event,
+        # which cleanly unblocks this call.
+        shutdown_event.wait()
+    
+    except KeyboardInterrupt:
+        # This is a fallback in case the .wait() is
+        # interrupted before the handler sets the event.
+        if not shutdown_event.is_set():
+            click.echo("\nKeyboardInterrupt. Forcing shutdown...")
+            shutdown_event.set()
+        pass  # Always proceed to finally
+    
+    finally:
+        # --- This block will now be reached ---
+        click.echo("Waiting for workers to finish current jobs...")
+        for p in processes:
+            p.join()  # This will wait for workers to exit
+        
+        if os.path.exists(PID_FILE):
+            os.remove(PID_FILE)
+        click.echo("All workers have shut down.")
+
+
+@worker.command('stop')
+def stop():
+    """
+    Stops all running workers by reading the .pid file
+    and sending a TERM signal.
+    """
+    if not os.path.exists(PID_FILE):
+        click.echo("No PID file found. Are workers running?")
+        return
+    
+    click.echo(f"Reading PID file: {PID_FILE}")
+    try:
+        with open(PID_FILE, 'r') as f:
+            pids = [int(pid) for pid in f.read().splitlines() if pid.strip()]
+        
+        if not pids:
+            click.echo("PID file is empty.")
+            return
+        
+        click.echo(f"Sending SIGTERM to {len(pids)} worker(s)...")
+        for pid in pids:
+            try:
+                # Send the TERM signal, which our worker handles
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                click.echo(f"Warning: Worker with PID {pid} not found (already stopped).")
+            except Exception as e:
+                click.echo(f"Error stopping worker {pid}: {e}")
+    
+    except Exception as e:
+        click.echo(f"Error reading PID file: {e}")
+    finally:
+        # Clean up the PID file
+        if os.path.exists(PID_FILE):
+            os.remove(PID_FILE)
+        click.echo("Shutdown complete. PID file removed.")
 
 
 # --- List Command ---
