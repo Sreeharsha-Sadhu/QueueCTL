@@ -101,7 +101,7 @@ def run_worker_loop(shutdown_event: SyncEvent):
             else:
                 # --- No job found, sleep for a second ---
                 # This wait is interruptible by the shutdown_event
-                shutdown_event.wait(timeout=1.0)
+                shutdown_event.wait(timeout=0.1)
         
         else:
             # --- STATE 3: We are idle AND shutting down ---

@@ -11,18 +11,15 @@ DATABASE_FILE = 'queue.db'
 def get_db_connection():
     """Establishes a connection to the SQLite database."""
     # Ensure the DB file exists if we're trying to connect
-    if not os.path.exists(DATABASE_FILE):
-        if 'init' not in sys.argv:  # Avoid loop during init
-            print(f"Error: Database file '{DATABASE_FILE}' not found.")
-            print("Please run 'queuectl init' first.")
-            exit(1)
-    
-    conn = sqlite3.connect(DATABASE_FILE, detect_types=sqlite3.PARSE_DECLTYPES)
-    conn.row_factory = sqlite3.Row  # Access columns by name
-    # Enable WAL mode for better concurrency
-    conn.execute("PRAGMA journal_mode=WAL;")
-    return conn
-
+    try:
+        conn = sqlite3.connect(DATABASE_FILE, timeout=10.0, detect_types=sqlite3.PARSE_DECLTYPES)
+        conn.row_factory = sqlite3.Row  # Access columns by name
+        conn.execute("PRAGMA journal_mode=WAL;")
+        return conn
+    except sqlite3.Error as e:
+        print(f"FATAL: Could not connect to database at {DATABASE_FILE}: {e}")
+        print("Run 'queuectl init' to create the database.")
+        exit(1)
 
 def init_db():
     """Initializes the database and creates tables."""
@@ -138,9 +135,6 @@ def create_job(job_id, command, max_retries_override=None):
         conn.close()
 
 
-# queuectl/database.py
-# ... (add these functions to your existing file) ...
-
 def fetch_and_lock_job():
     """
     Atomically fetches the next available job and marks it as 'processing'.
@@ -216,6 +210,7 @@ def finalize_job(job_id, success):
                 """,
                 (now, job_id)
             )
+            conn.commit()
         else:
             # --- Unhappy Path (Retry/DLQ Logic) ---
             conn.execute("BEGIN IMMEDIATE")  # Lock for read-modify-write
@@ -280,7 +275,8 @@ def finalize_job(job_id, success):
     
     except sqlite3.Error as e:
         print(f"Database error finalizing job {job_id}: {e}")
-        conn.rollback()  # Rollback on error
+        if not success:  # Only rollback if we were in the 'else' block's transaction
+            conn.rollback()
     finally:
         conn.close()
 
