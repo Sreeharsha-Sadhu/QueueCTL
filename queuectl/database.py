@@ -332,7 +332,6 @@ def retry_dlq_job(job_id):
         conn.close()
 
 
-
 def release_job(job_id):
     """Resets a 'processing' job back to 'pending' on graceful shutdown."""
     conn = get_db_connection()
@@ -351,5 +350,22 @@ def release_job(job_id):
         conn.commit()
     except sqlite3.Error as e:
         print(f"Database error releasing job {job_id}: {e}")
+    finally:
+        conn.close()
+
+
+def get_job_status_summary():
+    """Gets a count of jobs grouped by state."""
+    conn = get_db_connection()
+    try:
+        cursor = conn.execute(
+            "SELECT state, COUNT(*) as count FROM jobs GROUP BY state"
+        )
+        rows = cursor.fetchall()
+        # Return as a simple dict: {'pending': 5, 'completed': 10}
+        return {row['state']: row['count'] for row in rows}
+    except sqlite3.Error as e:
+        print(f"Database error getting job summary: {e}")
+        return {}
     finally:
         conn.close()
