@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>QueueCTL Dashboard</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 0; background: #f8f9fa; }
+        nav { background: #343a40; color: white; padding: 1rem; font-size: 1.5rem; }
+        .container { max-width: 1200px; margin: 1rem auto; padding: 1rem; }
+        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; }
+        .summary { display: flex; gap: 1rem; margin-bottom: 2rem; grid-column: 1 / -1; }
+        .card { background: white; border: 1px solid #ddd; border-radius: 8px; padding: 1.5rem; flex: 1; text-align: center; }
+        .card h3 { margin: 0 0 0.5rem 0; color: #555; }
+        .card p { font-size: 2.5rem; margin: 0; font-weight: 300; }
+        .card.dead { color: #d9534f; }
+        .card.processing { color: #0275d8; }
+        .card.pending { color: #f0ad4e; }
+        .card.completed { color: #5cb85c; }
+        .card.workers { background: #f1f1f1; }
+        .card.workers p { font-size: 1.2rem; font-weight: normal; }
+
+        .box { background: white; border: 1px solid #ddd; border-radius: 8px; padding: 1.5rem; }
+        h2 { border-bottom: 2px solid #ccc; padding-bottom: 0.5rem; margin-top: 0; }
+
+        form label { display: block; margin-bottom: 0.5rem; font-weight: bold; }
+        form input, form textarea { width: 100%; padding: 0.5rem; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px; }
+        form textarea { min-height: 120px; font-family: monospace; }
+        form button { background: #0275d8; color: white; padding: 0.75rem 1rem; border: none; border-radius: 4px; cursor: pointer; font-size: 1rem; }
+        form .config-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+
+        table { width: 100%; border-collapse: collapse; background: white; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-top: 2rem; grid-column: 1 / -1; }
+        th, td { padding: 1rem; text-align: left; border-bottom: 1px solid #ddd; }
+        th { background: #f1f1f1; }
+        tr:hover { background: #f9f9f9; }
+        .state { font-weight: bold; }
+        .state-dead { color: #d9534f; }
+        .state-processing { color: #0275d8; }
+        .state-failed { color: #f0ad4e; }
+        .state-scheduled { color: #5bc0de; }
+        .state-completed { color: #5cb85c; }
+        .actions a { color: #0275d8; text-decoration: none; margin-right: 10px; }
+        .actions a.delete { color: #d9534f; }
+    </style>
+</head>
+<body>
+    <nav>QueueCTL Dashboard</nav>
+    <div class="container">
+        <div class="summary">
+            <div class="card dead"><p>{{ summary.get('dead', 0) }}</p><h3>Dead</h3></div>
+            <div class="card processing"><p>{{ summary.get('processing', 0) }}</p><h3>Processing</h3></div>
+            <div class="card pending"><p>{{ summary.get('failed', 0) + summary.get('pending', 0) + summary.get('scheduled', 0) }}</p><h3>Pending / Failed / Scheduled</h3></div>
+            <div class="card completed"><p>{{ summary.get('completed', 0) }}</p><h3>Completed</h3></div>
+            <div class="card workers"><p>{{ worker_status }}</p><h3>Worker Status</h3></div>
+        </div>
+
+        <div class="grid">
+            <div class="box">
+                <h2>Enqueue New Job</h2>
+                <form action="/enqueue" method="POST">
+                    <label for="job_json">Job JSON Specification</label>
+                    <textarea id="job_json" name="job_json" placeholder='{&#10;  "id": "job-web-{{ range(1,10000) | random }}",&#10;  "command": "echo Hello from web",&#10;  "priority": 1,&#10;  "timeout": 60,&#10;  "run_at": "2025-11-10T10:00:00Z"&#10;}'></textarea>
+                    <button type="submit" style="margin-top: 1rem;">Enqueue Job</button>
+                </form>
+            </div>
+
+            <div class="box">
+                <h2>Configuration</h2>
+                <form action="/config" method="POST">
+                    <div class="config-grid">
+                        <div>
+                            <label for="max_retries">Max Retries</label>
+                            <input type="number" id="max_retries" name="max_retries" value="{{ config.get('max_retries', 3) }}">
+                        </div>
+                        <div>
+                            <label for="backoff_base">Backoff Base (sec)</label>
+                            <input type="number" id="backoff_base" name="backoff_base" value="{{ config.get('backoff_base', 2) }}">
+                        </div>
+                    </div>
+                    <button type="submit" style="margin-top: 1rem;">Save Config</button>
+                </form>
+            </div>
+        </div>
+
+        <h2>Dead Letter Queue (DLQ)</h2>
+        {% if dlq_jobs %}
+            <table>
+                <tr><th>ID</th><th>Command</th><th>Attempts</th><th>Last Updated</th><th>Actions</th></tr>
+                {% for job in dlq_jobs %}
+                <tr>
+                    <td>{{ job['id'] }}</td>
+                    <td><code>{{ job['command'] }}</code></td>
+                    <td>{{ job['attempts'] }}</td>
+                    <td>{{ job['updated_at'] }}</td>
+                    <td class="actions">
+                        <a href="/job/requeue/{{ job['id'] }}">Requeue</a>
+                        <a href="/job/logs/{{ job['id'] }}" target="_blank">Logs</a>
+                        <a href="/job/delete/{{ job['id'] }}" class="delete">Delete</a>
+                    </td>
+                </tr>
+                {% endfor %}
+            </table>
+        {% else %}
+            <p>DLQ is empty.</p>
+        {% endif %}
+
+        <h2>In-Flight Jobs (Processing, Failed, Scheduled)</h2>
+        <table>
+            <tr><th>ID</th><th>State</th><th>Command</th><th>Priority</th><th>Next Run</th><th>Actions</th></tr>
+            {% for job in inflight_jobs %}
+            <tr>
+                <td>{{ job['id'] }}</td>
+                <td><span class="state state-{{ job['state'] }}">{{ job['state'] }}</span></td>
+                <td><code>{{ job['command'] }}</code></td>
+                <td>{{ job['priority'] }}</td>
+                <td>{{ job['run_at'] or 'N/A' }}</td>
+                <td class="actions">
+                    {% if job['state'] == 'failed' %}
+                    <a href="/job/requeue/{{ job['id'] }}">Requeue</a>
+                    {% endif %}
+                    <a href="/job/logs/{{ job['id'] }}" target="_blank">Logs</a>
+                    <a href="/job/delete/{{ job['id'] }}" class="delete">Delete</a>
+                </td>
+            </tr>
+            {% endfor %}
+        </table>
+
+        <h2>Recent Completed Jobs</h2>
+        <table>
+            <tr><th>ID</th><th>Command</th><th>Completed At</th><th>Actions</th></tr>
+            {% for job in completed_jobs %}
+            <tr>
+                <td>{{ job['id'] }}</td>
+                <td><code>{{ job['command'] }}</code></td>
+                <td>{{ job['completed_at'] }}</td>
+                <td class="actions">
+                    <a href="/job/logs/{{ job['id'] }}" target="_blank">Logs</a>
+                    <a href="/job/delete/{{ job['id'] }}" class="delete">Delete</a>
+                </td>
+            </tr>
+            {% endfor %}
+        </table>
+    </div>
+</body>
+</html>

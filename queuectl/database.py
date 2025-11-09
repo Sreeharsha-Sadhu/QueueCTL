@@ -449,3 +449,60 @@ def mark_job_started(job_id):
         print(f"Database error marking job started: {e}")
     finally:
         conn.close()
+
+
+def get_all_config():
+    """Gets all key-value pairs from the config table."""
+    conn = get_db_connection()
+    try:
+        cursor = conn.execute("SELECT key, value FROM config")
+        return {row['key']: row['value'] for row in cursor.fetchall()}
+    except sqlite3.Error as e:
+        print(f"Database error getting all config: {e}")
+        return {}
+    finally:
+        conn.close()
+
+
+def delete_job(job_id):
+    """Permanently deletes a job from the queue."""
+    conn = get_db_connection()
+    try:
+        conn.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+        conn.commit()
+        print(f"DB: Deleted job {job_id}")
+    except sqlite3.Error as e:
+        print(f"Database error deleting job {job_id}: {e}")
+    finally:
+        conn.close()
+
+
+def requeue_job(job_id):
+    """Moves any 'failed' or 'dead' job back to 'pending'."""
+    conn = get_db_connection()
+    now = datetime.now(timezone.utc)
+    try:
+        # This is a more general-purpose "retry"
+        cursor = conn.execute(
+            """
+            UPDATE jobs
+            SET state      = 'pending',
+                attempts   = 0,
+                updated_at = ?,
+                run_at     = NULL
+            WHERE id = ?
+              AND state IN ('dead', 'failed')
+            """,
+            (now, job_id)
+        )
+        if cursor.rowcount > 0:
+            conn.commit()
+            print(f"DB: Re-queued job {job_id}")
+        else:
+            conn.rollback()
+            print(f"DB: Job {job_id} not found or not in a re-queueable state.")
+    
+    except sqlite3.Error as e:
+        print(f"Database error re-queuing job {job_id}: {e}")
+    finally:
+        conn.close()

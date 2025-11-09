@@ -6,8 +6,7 @@ import os
 import signal
 import multiprocessing
 from . import database
-
-LOG_DIR = 'logs'
+from .config import LOG_DIR
 
 
 def execute_job(job):

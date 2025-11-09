@@ -10,8 +10,7 @@ import time
 from . import database
 from . import worker as worker_module
 from . import dashboard
-
-PID_FILE = '.queuectl.pids'
+from .config import PID_FILE, LOG_DIR
 
 
 @click.group()
@@ -136,9 +135,10 @@ def logs(job_id, log_type):
     Show the stdout or stderr logs for a job.
     Logs are stored in the 'logs/' directory.
     """
-    log_dir = 'logs'
+    # log_dir = 'logs' <-- REMOVE
     log_suffix = 'out.log' if log_type == 'out' else 'err.log'
-    log_file_path = os.path.join(log_dir, f"{job_id}.{log_suffix}")
+    # Use the new constant
+    log_file_path = os.path.join(LOG_DIR, f"{job_id}.{log_suffix}")
     
     if not os.path.exists(log_file_path):
         click.echo(f"Log file not found: {log_file_path}")
