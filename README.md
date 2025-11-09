@@ -1,66 +1,73 @@
-# QueueCTL - CLI Background Job Queue
+# QueueCTL: A CLI & Web-Based Background Job Queue
 
 `queuectl` is a minimal, production-grade background job queue system built in Python. It is designed to manage background jobs with multiple worker processes, handle retries using exponential backoff, and maintain a Dead Letter Queue (DLQ) for permanently failed jobs.
+
+It features a full-featured CLI for system administration and a live-monitoring web dashboard to manage the queue from a browser.
 
 This project was built as part of a backend developer internship assignment.
 
 [Link to your CLI Demo Video]
 
-## ✨ Core Features
+## Core Features
 
-* **CLI Interface:** All operations managed via a `click`-based CLI.
-* **Persistent Storage:** Uses **SQLite** for robust, serverless job persistence.
-* **Concurrent Workers:** Runs multiple worker processes using Python's `multiprocessing` module.
-* **Race-Condition Safe:** Uses atomic database transactions (`BEGIN IMMEDIATE`) to ensure a job is only ever picked up by one worker.
-* **Retry & Backoff:** Automatically retries failed jobs with configurable exponential backoff (`delay = base ^ attempts`).
-* **Dead Letter Queue (DLQ):** Moves jobs to a `dead` state after exhausting retries, where they can be manually inspected and retried.
-* **Graceful Shutdown:** Workers can be stopped gracefully (`queuectl worker stop` or `Ctrl+C`), allowing them to finish their current job before exiting.
+  * **CLI Interface:** All operations are managed via a `click`-based Command Line Interface.
+  * **Live Web Dashboard:** A `Flask`-based dashboard provides an interface to monitor, enqueue, re-queue, and delete jobs. It includes live-updating worker status and start/stop controls.
+  * **Persistent Storage:** Uses **SQLite** for robust, serverless job persistence with WAL (Write-Ahead Logging) mode enabled for high concurrency.
+  * **Concurrent Workers:** Runs multiple worker processes using Python's `multiprocessing` module.
+  * **Race-Condition Safe:** Employs atomic database transactions (`BEGIN IMMEDIATE`) to ensure a job is only ever picked up by one worker.
+  * **Retry & Backoff:** Automatically retries failed jobs with configurable exponential backoff (`delay = base ^ attempts`).
+  * **Dead Letter Queue (DLQ):** Moves jobs to a `dead` state after exhausting retries, where they can be manually inspected and retried.
+  * **Job Scheduling:** Enqueue jobs to run at a specific time in the future using an `run_at` ISO 8601 timestamp.
+  * **Priority Queues:** Higher-priority jobs are processed before lower-priority jobs.
+  * **Job Timeouts:** Automatically fails jobs that run longer than a specified `timeout`.
+  * **Persistent Logging:** `stdout` and `stderr` for all jobs are saved to the `logs/` directory for debugging.
+  * **Graceful Shutdown:** Workers can be stopped gracefully (`queuectl worker stop` or `Ctrl+C`), allowing them to finish their current job before exiting.
 
----
+-----
 
-## 🏛️ Architecture Overview
+## Architecture Overview
 
-### 1. Job Lifecycle
+### 1\. Job Lifecycle
 
-A job moves through a simple state machine:
+A job moves through a simple, well-defined state machine:
 
-1.  **`pending`**: The initial state. A job waits in the queue to be picked up.
-2.  **`processing`**: A worker has locked the job and is executing its command.
-3.  **`completed`**: The job's command exited with code `0`.
-4.  **`failed`**: The command exited with a non-zero code. The worker calculates the next retry time and sets the job's `run_at` timestamp.
-5.  **`dead`**: The job has failed `max_retries` times and is moved to the DLQ.
+1.  **`scheduled`**: (Optional) The job has a `run_at` timestamp in the future.
+2.  **`pending`**: The job is waiting to be picked up by a worker.
+3.  **`processing`**: A worker has locked the job and is executing its command.
+4.  **`completed`**: The job's command exited with code `0`.
+5.  **`failed`**: The command exited with a non-zero code. The worker calculates the next retry time and sets the job's `run_at` timestamp.
+6.  **`dead`**: The job has failed `max_retries` times and is moved to the DLQ.
 
-### 2. Persistence
+### 2\. Persistence
 
-* An embedded **SQLite** database (`queue.db`) is used for all persistence.
-* **Why SQLite?** It's serverless, file-based, requires zero setup, and provides robust ACID-compliant transactions and locking, which are essential for a job queue.
-* The DB is set to `WAL` (Write-Ahead Logging) mode to improve concurrency.
-* **Tables:**
-    * `jobs`: Stores the job specification and state.
-    * `config`: A simple key-value store for settings like `max_retries`.
+  * An embedded **SQLite** database (`queue.db`) is used for all persistence.
+  * **Rationale:** SQLite is serverless, file-based, requires zero setup, and provides robust ACID-compliant transactions (with a `timeout` for locking), which are essential for a job queue.
+  * The DB is set to `WAL` (Write-Ahead Logging) mode to improve concurrency.
+  * **Tables:**
+      * `jobs`: Stores the job specification and state (including `priority`, `timeout`, `run_at`, etc.).
+      * `config`: A simple key-value store for system settings.
 
-### 3. Worker Logic
+### 3\. Worker Logic
 
-* **Concurrency:** The `worker start --count <N>` command spawns `N` independent Python processes.
-* **Job Fetching:** The *most critical* piece of logic is the `fetch_and_lock_job` function. It works as follows:
-    1.  `BEGIN IMMEDIATE TRANSACTION;` - This immediately acquires a database lock.
-    2.  `SELECT` the next available job (`state='pending'` or `state='failed'` and `run_at <= NOW()`).
-    3.  `UPDATE` the job's state to `processing`.
-    4.  `COMMIT;`
-    * Because this operation is wrapped in a transaction, it is **atomic**. No two workers can ever get the same job.
-* **Execution:** Jobs are run using `subprocess.Popen` in `shell=True` mode, allowing them to execute shell commands.
-* **Graceful Shutdown:** A `multiprocessing.Event` is shared between the main `start` command and all child workers. When `Ctrl+C` is pressed (or `worker stop` is run), the event is set.
-    * **Idle workers** stop immediately.
-    * **Busy workers** are in a non-blocking `poll()` loop, which allows them to finish their current job before exiting.
+  * **Concurrency:** The `worker start --count <N>` command spawns `N` independent Python processes.
+  * **Job Fetching:** The `fetch_and_lock_job` function atomically selects the next available job, ordered by `priority DESC, created_at ASC`.
+  * **Execution:** Jobs are run using `subprocess.Popen` in `shell=True` mode. `stdout` and `stderr` are redirected to files in the `logs/` directory.
+  * **State Machine:** The worker runs as a non-blocking state machine, polling `subprocess.poll()` and checking for job timeouts, allowing it to respond to shutdown signals instantly.
 
----
+### 4\. Web Dashboard
 
-## 🚀 Setup & Installation
+  * A lightweight `Flask` server provides a web UI. It reads from and writes to the *same* `queue.db` file, allowing real-time monitoring and management.
+  * It features an API endpoint (`/api/worker-status`) that polls the `.queuectl.pids` file, enabling live status updates on the dashboard.
+  * It can start/stop workers by launching `queuectl worker start/stop` commands as detached subprocesses.
+
+-----
+
+## Setup & Installation
 
 1.  **Clone the repository:**
 
     ```sh
-    git clone [Your-Repo-URL]
+    git clone https://github.com/Sreeharsha-Sadhu/QueueCTL.git
     cd queuectl_project
     ```
 
@@ -75,51 +82,20 @@ A job moves through a simple state machine:
     ```
 
 3.  **Install the package in editable mode:**
-    This installs dependencies (like `click`) and creates the `queuectl` command in your path.
+    This installs dependencies (like `click` and `flask`) and creates the `queuectl` command in your path. (Ensure `flask` is in your `setup.py` or `requirements.txt`).
 
     ```sh
     pip install -e .
+    # If Flask isn't in setup.py, install it manually:
+    pip install flask
     ```
 
 4.  **Install `sqlite3` CLI (for Testing)**
     The Python application uses a built-in `sqlite3` module, but the **`test_scenarios.sh`** script (and any manual database checks) requires the `sqlite3` command-line tool.
 
-      * **macOS:**
-        `sqlite3` is typically pre-installed. If not, use Homebrew:
-
-        ```sh
-        brew install sqlite3
-        ```
-
-      * **Linux (Debian/Ubuntu):**
-
-        ```sh
-        sudo apt-get update && sudo apt-get install sqlite3
-        ```
-
-      * **Linux (Fedora/RHEL):**
-
-        ```sh
-        sudo dnf install sqlite3
-        ```
-
-      * **Windows:**
-        Windows does not include `sqlite3` by default. The easiest way is to use a package manager:
-
-        ```sh
-        # If you use Scoop
-        scoop install sqlite
-
-        # If you use Chocolatey
-        choco install sqlite
-        ```
-
-        **Manual Method (Windows):**
-
-        1.  Go to the [SQLite Download Page](https://www.sqlite.org/download.html).
-        2.  Download the **`sqlite-tools-win32-*.zip`** file.
-        3.  Extract `sqlite3.exe` from the zip.
-        4.  Place `sqlite3.exe` somewhere in your system's `PATH` (e.g., `C:\Windows\System32` or your Git `usr/bin` folder).
+      * **macOS:** `brew install sqlite3`
+      * **Linux (Debian/Ubuntu):** `sudo apt-get update && sudo apt-get install sqlite3`
+      * **Windows:** `scoop install sqlite` or `choco install sqlite`
 
 5.  **Initialize the database:**
     This creates the `queue.db` file and its tables.
@@ -127,33 +103,29 @@ A job moves through a simple state machine:
     ```sh
     queuectl init
     ```
----
 
-## ⚙️ Usage Examples
+6.  **Create Log Directory:**
+    This step is required for the workers to save job output.
 
-### 1. Configuration
+    ```sh
+    mkdir logs
+    ```
 
-Set the default max retries to 5.
+-----
+
+## Usage Examples
+
+### 1\. Running the Web Dashboard (Recommended)
+
+This is the easiest way to use the system.
+
 ```sh
-queuectl config set max_retries 5
+queuectl web
 ```
 
-### 2. Enqueueing Jobs
+Then open `http://127.0.0.1:5000` in your browser. From here, you can start/stop workers, enqueue jobs, and manage the DLQ.
 
-*Note: PowerShell users must escape inner quotes with a backtick (`` ` ``). macOS/Linux users should use single/double quotes normally.*
-
-```sh
-# PowerShell
-queuectl enqueue "{\`"id\`": \`"job1\`", \`"command\`": \`"echo Hello World\`"}"
-
-# Windows (cmd.exe) - use 'timeout' for sleep
-queuectl enqueue "{\"id\": \"job-win-sleep\", \"command\": \"timeout /t 5 /nobreak\"}"
-
-# macOS/Linux - use 'sleep'
-queuectl enqueue '{"id": "job-nix-sleep", "command": "sleep 5"}'
-```
-
-### 3. Running Workers
+### 2\. Running Workers via CLI
 
 ```sh
 # Start 4 workers in the foreground
@@ -163,63 +135,75 @@ queuectl worker start --count 4
 queuectl worker stop
 ```
 
-### 4. Checking Status
+### 3\. Enqueueing Jobs via CLI
+
+*Note: Quoting is shell-specific. These examples are for PowerShell.*
+
+**Basic Job:**
 
 ```sh
+queuectl enqueue "{\`"id\`": \`"job1\`", \`"command\`": \`"echo Hello World\`"}"
+```
+
+**Advanced Job (Scheduled, High-Priority, Timeout):**
+
+```powershell
+# This job has priority 10, will run after the specified time,
+# and will be killed if it takes longer than 60 seconds.
+$run_at = [System.DateTime]::UtcNow.AddMinutes(5).ToString("o")
+queuectl enqueue "{\`"id\`": \`"job-adv\`", \`"command\`": \`"ping -n 30 127.0.0.1 > NUL\`", \`"priority\`": 10, \`"timeout\`": 60, \`"run_at\`": \`"$run_at\`"}"
+```
+
+### 4\. Viewing Logs via CLI
+
+```sh
+# View the stdout for 'job1'
+queuectl logs job1
+
+# View the stderr for 'job1'
+queuectl logs job1 --stderr
+```
+
+### 5\. Other CLI Commands
+
+```sh
+# Set the default max retries to 5
+queuectl config set max_retries 5
+
 # Get a live summary of all jobs and workers
 queuectl status
-```
-**Example Output:**
-```
---- Job Status ---
-- Pending     : 2
-- Processing  : 4
-- Completed   : 12
-- Dead        : 1
-- Total       : 19
 
---- Worker Status ---
-Active: 4 worker(s) running (PIDs: 123, 124, 125, 126)
-```
-
-### 5. Managing the DLQ
-
-```sh
-# Enqueue a job that will fail
-queuectl enqueue "{\`"id\`": \`"bad-job\`", \`"command\`": \`"invalid-command\`"}"
-
-# (Wait for it to fail 3 times and move to DLQ...)
+# List all pending jobs
+queuectl list --state pending
 
 # List jobs in the DLQ
 queuectl dlq list
 
-# Retry the failed job
+# Retry a failed job from the DLQ
 queuectl dlq retry bad-job
 ```
 
----
+-----
 
-## 🧪 Testing
+## Testing
 
-A test script is provided to validate all core functionality. It simulates a "happy path," a "failure path," and a "concurrency path."
+A comprehensive, cross-platform test script is provided to validate all core functionality.
 
 1.  Make sure your database is initialized (`queuectl init`).
-2.  Make sure no workers are running (`queuectl worker stop`).
+2.  Make sure no workers are running (the script handles this, but `queuectl worker stop` is a good manual first step).
 3.  Run the test script:
-
     ```sh
     # On macOS/Linux:
     chmod +x test_scenarios.sh
     ./test_scenarios.sh
 
-    # On Windows:
-    # You may need to run this in Git Bash or WSL, as it's a .sh file.
-    # Alternatively, manually run the commands inside the script.
+    # On Windows (must be run from Git Bash):
     bash test_scenarios.sh
     ```
 
-## 🧠 Assumptions & Trade-offs
+## Assumptions & Trade-offs
 
-* **`shell=True`**: This is a potential security risk if the command string can be injected by a malicious user. For this assignment, it's assumed the enqueuer is a trusted source.
-* **SQLite Concurrency**: While `WAL` mode and atomic transactions are robust, a dedicated queue (like RabbitMQ or Redis) would scale better under extreme write load. SQLite is perfect for a self-contained application.
-* **Worker Management**: The PID file is a simple and effective way to manage worker processes. A more complex system might use a dedicated daemon or service manager.
+  * **`shell=True`**: This is a potential security risk if the command string can be injected by a malicious user. For this assignment, it is assumed the enqueuer is a trusted source.
+  * **SQLite Concurrency**: While `WAL` mode and a `timeout=10.0` make SQLite robust, a dedicated queue (like RabbitMQ or Redis) would scale better under extreme write load.
+  * **Web Server Security**: The Flask server runs in `debug=True` mode, which is not suitable for an internet-facing production environment. It is designed for local monitoring.
+  * **Windows Shutdown**: On Windows, a "graceful" shutdown is not always possible. The `stop` command uses `taskkill /T /F` (force kill) to ensure the process tree is reliably cleaned up, which is a trade-off for robustness. This behavior is accounted for in the test script.
