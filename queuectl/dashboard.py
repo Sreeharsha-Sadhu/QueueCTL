@@ -1,18 +1,18 @@
-# queuectl/dashboard.py
-
 import json
-import os  # <-- Add os import
-from flask import Flask, render_template, redirect, url_for, request  # <-- Add request
+import os
+import subprocess
+from flask import Flask, render_template, redirect, url_for, request, jsonify
 from . import database
 from .config import PID_FILE, LOG_DIR
 
 app = Flask(__name__)
 
+
 def get_db():
     """Helper to get a DB connection for the web request."""
-    # We're just reading, so a new connection per request is fine.
     db = database.get_db_connection()
     return db
+
 
 def get_worker_status():
     """Checks the .pid file to see if workers are active."""
@@ -21,12 +21,19 @@ def get_worker_status():
             with open(PID_FILE, 'r') as f:
                 pids = [pid for pid in f.read().splitlines() if pid.strip()]
             if pids:
-                return f"Active: {len(pids)} worker(s) running (PID: {', '.join(pids)})"
+                return f"Active: Main process (PID: {', '.join(pids)})"
             else:
                 return "Inactive: PID file is empty."
         except Exception as e:
             return f"Error: {e}"
     return "Inactive: No PID file."
+
+
+@app.route("/api/worker-status")
+def api_worker_status():
+    """Returns the worker status as JSON for live polling."""
+    status = get_worker_status()
+    return jsonify({"status": status, "is_active": status.startswith("Active")})
 
 
 @app.route("/")
@@ -40,10 +47,9 @@ def index():
     ).fetchall()
     summary = {row['state']: row['count'] for row in summary_rows}
     
-    # --- NEW: Get Config and Worker Status ---
+    # Get Config and Worker Status
     config = database.get_all_config()
     worker_status = get_worker_status()
-    # --- END NEW ---
     
     # Get 25 most recent jobs from DLQ
     dlq_jobs = db.execute(
@@ -65,15 +71,48 @@ def index():
     return render_template(
         'dashboard.html',
         summary=summary,
-        config=config,  # <-- NEW
-        worker_status=worker_status,  # <-- NEW
+        config=config,
+        worker_status=worker_status,  # Pass initial status
         dlq_jobs=dlq_jobs,
         inflight_jobs=inflight_jobs,
         completed_jobs=completed_jobs
     )
 
 
-# --- NEW: Enqueue Route ---
+# --- Worker Control Routes ---
+@app.route("/worker/start", methods=['POST'])
+def start_workers():
+    """
+    Launches the 'queuectl worker start' command as a
+    separate background process.
+    """
+    if not get_worker_status().startswith("Active"):
+        count = request.form.get('count', '2')
+        try:
+            print(f"WEB: Launching 'queuectl worker start --count {count}'...")
+            subprocess.Popen(['queuectl', 'worker', 'start', '--count', count])
+        except Exception as e:
+            print(f"WEB ERROR: Failed to start workers: {e}")
+    
+    return redirect(url_for('index'))
+
+
+@app.route("/worker/stop", methods=['POST'])
+def stop_workers():
+    """
+    Runs the 'queuectl worker stop' command to gracefully
+    shut down the background workers.
+    """
+    try:
+        print(f"WEB: Launching 'queuectl worker stop'...")
+        subprocess.run(['queuectl', 'worker', 'stop'])
+    except Exception as e:
+        print(f"WEB ERROR: Failed to stop workers: {e}")
+    
+    return redirect(url_for('index'))
+
+
+# --- Job & Config Routes ---
 @app.route("/enqueue", methods=['POST'])
 def enqueue_job():
     """Endpoint to enqueue a new job from a form."""
@@ -86,7 +125,6 @@ def enqueue_job():
         if not job_id or not command:
             raise ValueError("JSON must include 'id' and 'command'")
         
-        # Pass all optional fields
         database.create_job(
             job_id=job_id,
             command=command,
@@ -97,12 +135,10 @@ def enqueue_job():
         )
     except Exception as e:
         print(f"WEB ERROR: Failed to enqueue job: {e}")
-        # We could add a flash message here to show the error to the user
     
     return redirect(url_for('index'))
 
 
-# --- NEW: Config Route ---
 @app.route("/config", methods=['POST'])
 def update_config():
     """Endpoint to update config values."""
@@ -121,25 +157,22 @@ def update_config():
     return redirect(url_for('index'))
 
 
-# --- NEW: Re-queue Route (more general) ---
 @app.route("/job/requeue/<job_id>")
-def requeue_job(job_id):
+def requeue_job_route(job_id):
     """API endpoint to re-queue a 'failed' or 'dead' job."""
     print(f"WEB: Re-queuing job {job_id}...")
     database.requeue_job(job_id)
     return redirect(url_for('index'))
 
 
-# --- NEW: Delete Route ---
 @app.route("/job/delete/<job_id>")
-def delete_job(job_id):
+def delete_job_route(job_id):
     """API endpoint to delete any job."""
     print(f"WEB: Deleting job {job_id}...")
     database.delete_job(job_id)
     return redirect(url_for('index'))
 
 
-# --- NEW: View Logs Route ---
 @app.route("/job/logs/<job_id>")
 def view_logs(job_id):
     """Page to display stdout and stderr for a job."""
@@ -167,9 +200,6 @@ def view_logs(job_id):
         stderr=stderr_content
     )
 
-# ... (retry_job route can be removed or left as an alias for requeue) ...
-# Let's remove the old one to avoid confusion.
-# @app.route("/job/retry/<job_id>") ...
 
 def run_web_server():
     """Starts the Flask web server."""

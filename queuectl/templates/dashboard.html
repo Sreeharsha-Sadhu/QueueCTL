@@ -41,6 +41,25 @@
         .state-completed { color: #5cb85c; }
         .actions a { color: #0275d8; text-decoration: none; margin-right: 10px; }
         .actions a.delete { color: #d9534f; }
+
+        /* NEW styles for worker buttons */
+        .card.workers form { margin-top: 1rem; }
+        .card.workers button {
+            background: #d9534f;
+            color: white;
+            padding: 0.75rem 1rem;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 1rem;
+        }
+        .card.workers button.start { background: #5cb85c; }
+        .card.workers input[type="number"] {
+            width: 60px;
+            padding: 0.5rem;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
     </style>
 </head>
 <body>
@@ -51,8 +70,14 @@
             <div class="card processing"><p>{{ summary.get('processing', 0) }}</p><h3>Processing</h3></div>
             <div class="card pending"><p>{{ summary.get('failed', 0) + summary.get('pending', 0) + summary.get('scheduled', 0) }}</p><h3>Pending / Failed / Scheduled</h3></div>
             <div class="card completed"><p>{{ summary.get('completed', 0) }}</p><h3>Completed</h3></div>
-            <div class="card workers"><p>{{ worker_status }}</p><h3>Worker Status</h3></div>
-        </div>
+
+            <div class="card workers">
+                <p id="worker-status-text">{{ worker_status }}</p>
+                <h3>Worker Status</h3>
+                <div id="worker-actions">
+                    </div>
+            </div>
+            </div>
 
         <div class="grid">
             <div class="box">
@@ -141,5 +166,53 @@
             {% endfor %}
         </table>
     </div>
-</body>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const statusTextEl = document.getElementById('worker-status-text');
+            const actionsDivEl = document.getElementById('worker-actions');
+
+            const startFormHtml = `
+                <form action="/worker/start" method="POST">
+                    <label>Start Workers:</label>
+                    <input type="number" name="count" value="2" min="1">
+                    <button type="submit" class="start">Start</B>
+                </form>
+            `;
+
+            const stopFormHtml = `
+                <form action="/worker/stop" method="POST">
+                    <button type="submit" class="stop">Stop All Workers</B>
+                </form>
+            `;
+
+            async function updateStatus() {
+                try {
+                    const response = await fetch('/api/worker-status');
+                    if (!response.ok) throw new Error('Network error');
+
+                    const data = await response.json();
+
+                    // Update the status text
+                    statusTextEl.innerText = data.status;
+
+                    // Update the action button
+                    if (data.is_active) {
+                        actionsDivEl.innerHTML = stopFormHtml;
+                    } else {
+                        actionsDivEl.innerHTML = startFormHtml;
+                    }
+
+                } catch (e) {
+                    statusTextEl.innerText = 'Error: Connection to server lost.';
+                    actionsDivEl.innerHTML = ''; // Clear buttons
+                }
+            }
+
+            // Update on page load, and then every 3 seconds
+            updateStatus();
+            setInterval(updateStatus, 3000);
+        });
+    </script>
+    </body>
 </html>
